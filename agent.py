@@ -1,5 +1,6 @@
 """LangChain ReAct agent with tools for questions, answers, scheduled prompts, raw SQL, and Python execution."""
 import contextlib
+import contextvars
 import datetime as dt
 import io
 import json
@@ -20,15 +21,12 @@ from langgraph.prebuilt import create_react_agent
 import db
 from config import HISTORY_GAP_SECONDS, HISTORY_MAX_TURNS, LLM_MODEL, LLM_PROVIDER, TZ
 
-# Single-user bot — module-level list is safe since handlers are serialized
-# per chat by python-telegram-bot.
-_pending_images: list[str] = []
-
-
-def drain_pending_images() -> list[str]:
-    result = list(_pending_images)
-    _pending_images.clear()
-    return result
+# Per-invocation chart buffer. invoke_agent sets a fresh list per call so
+# concurrent Telegram + MCP invocations don't cross-contaminate. Drained
+# inside invoke_agent and returned alongside the reply.
+_pending_images: contextvars.ContextVar[list[str]] = contextvars.ContextVar(
+    "pending_images"
+)
 
 log = logging.getLogger("quizbot.agent")
 
@@ -242,7 +240,13 @@ def build_tools(
             path = Path(tempfile.gettempdir()) / f"chart_{uuid.uuid4().hex}.png"
             fig.savefig(path, dpi=110, bbox_inches="tight")
             plt.close(fig)
-            _pending_images.append(str(path))
+            buf = _pending_images.get(None)
+            if buf is None:
+                # Outside an invoke_agent scope: drop silently. The image
+                # would be unreachable anyway.
+                log.warning("run_python produced a chart outside invoke_agent scope; dropping")
+            else:
+                buf.append(str(path))
             chart_count += 1
 
         out = stdout.getvalue().strip()
@@ -284,8 +288,18 @@ def build_agent(
     return create_react_agent(llm, tools, state_modifier=SYSTEM_PROMPT)
 
 
-async def invoke_agent(agent, history: list[dict[str, str]], user_text: str) -> str:
-    messages = history + [{"role": "user", "content": user_text}]
-    result = await agent.ainvoke({"messages": messages})
-    last = result["messages"][-1]
-    return getattr(last, "content", "") or ""
+async def invoke_agent(
+    agent, history: list[dict[str, str]], user_text: str
+) -> tuple[str, list[str]]:
+    """Run the agent. Returns (reply_text, chart_paths). Chart paths are
+    owned by the caller — caller must read/send/unlink them."""
+    buf: list[str] = []
+    token = _pending_images.set(buf)
+    try:
+        messages = history + [{"role": "user", "content": user_text}]
+        result = await agent.ainvoke({"messages": messages})
+        last = result["messages"][-1]
+        reply = getattr(last, "content", "") or ""
+        return reply, list(buf)
+    finally:
+        _pending_images.reset(token)

@@ -7,3 +7,5 @@ langgraph==0.2.50
 langchain-openai==0.2.8
 langchain-anthropic==0.2.4
 langchain-ollama==0.2.0
+mcp>=1.8,<2
+uvicorn==0.32.0

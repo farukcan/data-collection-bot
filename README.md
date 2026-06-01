@@ -112,8 +112,35 @@ ignored silently.
 | `OPENAI_API_KEY` | — | required when provider = openai |
 | `ANTHROPIC_API_KEY` | — | required when provider = anthropic |
 | `OLLAMA_BASE_URL` | — | e.g. `http://localhost:11434` |
+| `MCP_HOST` | `127.0.0.1` | bind host for the MCP SSE server |
+| `MCP_PORT` | `8765` | bind port for the MCP SSE server |
+| `MCP_TOKEN` | empty | Bearer token; empty disables the MCP server |
 
-## 7) Schema (manual SQL access)
+## 7) MCP (SSE) server
+When `MCP_TOKEN` is set, the bot also exposes its agent as an MCP server over
+SSE so other agents (Claude Code, IDE clients, …) can call it.
+
+- Endpoint: `http://$MCP_HOST:$MCP_PORT/sse`
+- Auth: `Authorization: Bearer $MCP_TOKEN` on every request
+- Tool: `ask_agent(prompt: str)` — runs the same ReAct agent the Telegram
+  bot uses. Returns text plus any matplotlib charts as image content.
+- History: each SSE connection is its own session with its own history,
+  separate from the Telegram chat history.
+
+Example client config (Claude Code):
+```json
+{
+  "mcpServers": {
+    "quizbot": {
+      "transport": "sse",
+      "url": "http://127.0.0.1:8765/sse",
+      "headers": { "Authorization": "Bearer YOUR_MCP_TOKEN" }
+    }
+  }
+}
+```
+
+## 8) Schema (manual SQL access)
 ```sql
 CREATE TABLE questions (
   id TEXT PK, type TEXT, text TEXT,
@@ -136,7 +163,7 @@ CREATE TABLE scheduled_prompts (
 If you mutate the DB through direct SQL, restart the bot so the scheduler
 picks up the change (agent tools auto-resync; raw SQL does not).
 
-## 8) Backup
+## 9) Backup
 ```bash
 0 3 * * * cp data/answers.db backups/answers_$(date +\%F).db
 ```

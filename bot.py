@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Telegram data-collection bot with per-question cron, timeouts, and an LLM
 agent that can manage questions, answers, and scheduled prompts."""
+import asyncio
 import datetime as dt
 import logging
 from pathlib import Path
@@ -30,8 +31,9 @@ from telegram.ext import (
 import os
 
 import db
-from agent import build_agent, drain_pending_images, invoke_agent, push_history, trim_history
-from config import BOT_TOKEN, CHAT_ID, DB, TIMEZONE, TZ
+from agent import build_agent, invoke_agent, push_history, trim_history
+from config import BOT_TOKEN, CHAT_ID, DB, MCP_TOKEN, TIMEZONE, TZ
+from mcp_server import serve as serve_mcp
 
 logging.basicConfig(
     level=logging.INFO,
@@ -141,20 +143,20 @@ async def scheduled_prompt_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     agent = context.bot_data["agent"]
     try:
-        reply = await invoke_agent(agent, history=[], user_text=p["prompt"])
+        reply, images = await invoke_agent(agent, history=[], user_text=p["prompt"])
     except Exception as exc:
         log.exception("scheduled_prompt %s failed", pid)
         await context.bot.send_message(CHAT_ID, f"⚠️ Scheduled prompt {pid} hata: {exc}")
         schedule_prompt(context.job_queue, pid)
         return
-    await send_pending_images(context.bot, CHAT_ID)
+    await send_images(context.bot, CHAT_ID, images)
     if reply:
         await context.bot.send_message(CHAT_ID, f"⏰ {pid}\n\n{reply}")
     schedule_prompt(context.job_queue, pid)
 
 
-async def send_pending_images(bot, chat_id: int) -> None:
-    for path in drain_pending_images():
+async def send_images(bot, chat_id: int, paths: list[str]) -> None:
+    for path in paths:
         try:
             with open(path, "rb") as fp:
                 await bot.send_photo(chat_id, fp)
@@ -341,14 +343,14 @@ async def on_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     history = trim_history(context.bot_data)
     await context.bot.send_chat_action(msg.chat_id, "typing")
     try:
-        reply = await invoke_agent(agent, history=list(history), user_text=text)
+        reply, images = await invoke_agent(agent, history=list(history), user_text=text)
     except Exception as exc:
         log.exception("agent invocation failed")
         await msg.reply_text(f"⚠️ Agent hata: {exc}")
         return
     push_history(context.bot_data, "user", text)
     push_history(context.bot_data, "assistant", reply)
-    await send_pending_images(context.bot, msg.chat_id)
+    await send_images(context.bot, msg.chat_id, images)
     if reply:
         await msg.reply_text(reply)
 
@@ -370,7 +372,19 @@ def main() -> None:
     if seeded:
         log.info("Seeded %d questions from questions.json", seeded)
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    async def post_init(application: Application) -> None:
+        if not MCP_TOKEN:
+            log.info("MCP_TOKEN unset — MCP SSE server not started")
+            return
+        # Hold the task reference on bot_data so the GC can't collect it
+        # mid-flight and silently swallow uvicorn errors.
+        application.bot_data["mcp_task"] = asyncio.create_task(
+            serve_mcp(application.bot_data["agent"]),
+            name="mcp-sse-server",
+        )
+        log.info("MCP SSE server task scheduled")
+
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     # Tool callbacks need the job_queue from the running Application.
     job_queue = app.job_queue

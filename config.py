@@ -28,3 +28,8 @@ LLM_MODEL: str = os.environ.get("LLM_MODEL", _MODEL_DEFAULTS.get(LLM_PROVIDER, "
 # How long a chat history slot stays valid before being reset (seconds).
 HISTORY_GAP_SECONDS: int = 3600
 HISTORY_MAX_TURNS: int = 20
+
+# MCP (SSE) server — exposes the LLM agent to external agents.
+MCP_HOST: str = os.environ.get("MCP_HOST", "127.0.0.1")
+MCP_PORT: int = int(os.environ.get("MCP_PORT", "8765"))
+MCP_TOKEN: str = os.environ.get("MCP_TOKEN", "")
