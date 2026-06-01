@@ -19,6 +19,7 @@ from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 
 import db
+import tables
 from config import HISTORY_GAP_SECONDS, HISTORY_MAX_TURNS, LLM_MODEL, LLM_PROVIDER, TZ
 
 # Per-invocation chart buffer. invoke_agent sets a fresh list per call so
@@ -53,11 +54,14 @@ Yapabildiklerin:
   ana aracın. pandas (pd), matplotlib (plt) ve db modülü hazır. Her türlü
   ortalama/medyan/yüzde/trend/korelasyon vs. işini Python'da yap; sonuçları
   print() ile bastır — stdout sana geri döner. Grafik istenirse plt figürleri
-  otomatik kullanıcıya gönderilir.
+  otomatik kullanıcıya gönderilir. Tablo veya çok sütunlu liste göstermek için
+  run_python içinde send_table(headers, rows) kullan; metin tablo yazma.
 
 Kural:
 - Basit listeleme/filtreleme → query_answers, list_questions vs.
-- Hesaplama, aggregation, istatistik, format → run_python (print ile)
+- Hesaplama, aggregation, istatistik → run_python (print ile)
+- Tablo / sütunlu liste gösterme → run_python + send_table(headers, rows)
+- Grafik → run_python + plt
 - Sadece SQL'le çözülecek özel durumlar → run_sql
 
 Şema:
@@ -107,6 +111,21 @@ def clear_history(bot_data: dict[str, Any]) -> None:
     """Drop Telegram LLM chat history so the next message starts a fresh session."""
     bot_data["history"] = []
     bot_data.pop("history_last_ts", None)
+
+
+def _queue_table_image(headers: list[str], rows: list[list[str]]) -> str:
+    """Render a Plotly table PNG and queue it for the current agent invocation."""
+    buf = _pending_images.get(None)
+    if buf is None:
+        log.warning("send_table outside invoke_agent scope; dropping")
+        return "ERROR: send_table only works during agent invocation"
+    path = Path(tempfile.gettempdir()) / f"table_{uuid.uuid4().hex}.png"
+    try:
+        tables.render_table_from_rows(path, headers, [list(r) for r in rows])
+    except Exception as exc:
+        return f"ERROR: {type(exc).__name__}: {exc}"
+    buf.append(str(path))
+    return f"[tablo görseli kullanıcıya gönderildi ({len(rows)} satır)]"
 
 
 # ---------- tools ----------
@@ -239,17 +258,20 @@ def build_tools(
         Veri çekme: con = db.connect(); df = pd.read_sql('SELECT ...', con).
 
         Çıktı:
-        - Sayı/text/tablo döndürmek için print(...) kullan; stdout sana geri döner.
+        - Sayı/text özet için print(...) kullan; stdout sana geri döner.
+        - Tablo için send_table(headers, rows): headers ve her row string listesi;
+          görsel otomatik gönderilir, metin tablo yazma.
         - Sadece ifade yazmak (örn. "df.mean()") çıktı vermez, print(df.mean()) yaz.
         - Grafik için plt.figure() + plt.plot/bar/hist...; savefig'e gerek yok,
           açık figürler otomatik kullanıcıya gönderilir.
-        - Hem print hem grafik aynı anda olabilir."""
+        - print, send_table ve grafik aynı anda kullanılabilir."""
         stdout = io.StringIO()
         env: dict[str, Any] = {
             "pd": pd,
             "plt": plt,
             "db": db,
             "now_tz": dt.datetime.now(TZ),
+            "send_table": _queue_table_image,
         }
         err: Optional[str] = None
         try:
@@ -315,8 +337,8 @@ def build_agent(
 async def invoke_agent(
     agent, history: list[dict[str, str]], user_text: str
 ) -> tuple[str, list[str]]:
-    """Run the agent. Returns (reply_text, chart_paths). Chart paths are
-    owned by the caller — caller must read/send/unlink them."""
+    """Run the agent. Returns (reply_text, image_paths). Paths are chart or
+    table PNGs; caller must read/send/unlink them."""
     buf: list[str] = []
     token = _pending_images.set(buf)
     try:

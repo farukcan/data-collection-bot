@@ -61,7 +61,7 @@ def build_mcp(agent: Any, agent_lock: asyncio.Lock | None = None) -> FastMCP:
         description=(
             "Telegram botunun LLM agent'ine prompt yolla. "
             "Agent CRUD/SQL/Python tools'larını kullanarak cevap üretir. "
-            "Üretilen grafikler image content olarak döner. "
+            "Üretilen grafikler ve tablolar image content olarak döner. "
             "Her MCP session ayrı history tutar (Telegram'dan bağımsız)."
         )
     )

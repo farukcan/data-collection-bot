@@ -70,7 +70,7 @@ Any plain-text message from the owner triggers the agent. Tools:
 | `query_answers` / `delete_answer` | filter and remove answers |
 | `list_scheduled_prompts` / `add_scheduled_prompt` / `update_scheduled_prompt` / `delete_scheduled_prompt` | scheduled prompt CRUD |
 | `run_sql` | raw SQL (single statement) |
-| `run_python` | Python execution for analytics and chart generation (`pd`, `plt`, `db` available) |
+| `run_python` | Python execution for analytics, charts (`plt`), and tables (`send_table`; `pd`, `db` available) |
 | `now` | current date-time in the bot's timezone |
 
 When CRUD tools change the DB the scheduler auto-resyncs (no restart needed).
@@ -90,10 +90,10 @@ Default models per provider:
 - `ollama` → `llama3.1`
 
 ## 5) Commands
-- `/start` — chat id + help
-- `/list` — active questions + scheduled prompts + next cron run
+- `/start` — command help as a table image (chat id in caption)
+- `/list` — table image of active questions + scheduled prompts (next cron run)
 - `/ask [qid]` — trigger manually (no qid → all)
-- `/stats` — summary plus a scale-trend chart
+- `/stats` — summary table image plus a scale-trend chart when applicable
 - `/clear` — reset Telegram LLM chat history (next message starts a fresh session)
 
 All commands respond only to the configured `CHAT_ID`; other senders are
@@ -123,7 +123,8 @@ SSE so other agents (Claude Code, IDE clients, …) can call it.
 - Endpoint: `http://$MCP_HOST:$MCP_PORT/sse`
 - Auth: `Authorization: Bearer $MCP_TOKEN` on every request
 - Tool: `ask_agent(prompt: str)` — runs the same ReAct agent the Telegram
-  bot uses. Returns text plus any matplotlib charts as image content.
+  bot uses. Returns text plus matplotlib charts and Plotly table images as
+  image content.
 - History: each SSE connection is its own session with its own history,
   separate from the Telegram chat history. The same turn/gap limits are applied.
 - Concurrency: Telegram, scheduled prompts, and MCP calls share one agent

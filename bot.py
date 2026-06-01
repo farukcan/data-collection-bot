@@ -32,6 +32,7 @@ from telegram.ext import (
 import os
 
 import db
+import tables
 from agent import (
     build_agent,
     clear_history,
@@ -207,14 +208,41 @@ def schedule_all(job_queue) -> None:
 
 
 # ---------- command handlers ----------
+async def reply_table(
+    message,
+    headers: list[str],
+    rows: list[list[str]],
+    *,
+    caption: str | None = None,
+    path_prefix: str = "table",
+) -> None:
+    path = Path("/tmp") / f"{path_prefix}_{message.message_id}.png"
+    try:
+        tables.render_table_from_rows(path, headers, rows)
+        with path.open("rb") as fp:
+            await message.reply_photo(fp, caption=caption)
+    except Exception:
+        log.exception("reply_table failed prefix=%s", path_prefix)
+        await message.reply_text("Tablo görseli oluşturulamadı.")
+    finally:
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        f"Chat ID: {update.effective_chat.id}\n\n"
-        "/ask [qid] → soru(ları) şimdi gönder\n"
-        "/list → aktif soruları listele\n"
-        "/stats → istatistikler\n"
-        "/clear → LLM sohbet geçmişini sıfırla\n\n"
-        "Düz metin yazarsan LLM agent cevaplar (CRUD, sorgu, SQL, scheduled prompts)."
+    chat_id = update.effective_chat.id
+    await reply_table(
+        update.message,
+        ["Command", "Description"],
+        [
+            ["/ask [qid]", "Soru(ları) şimdi gönder"],
+            ["/list", "Aktif sorular ve scheduled prompts"],
+            ["/stats", "İstatistikler"],
+            ["/clear", "LLM sohbet geçmişini sıfırla"],
+            ["(metin)", "LLM agent: CRUD, sorgu, SQL, scheduled prompts"],
+        ],
+        caption=f"Chat ID: {chat_id}",
+        path_prefix="start",
     )
 
 
@@ -243,29 +271,60 @@ async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await send_question(context, q["id"])
 
 
+def _truncate(text: str, max_len: int) -> str:
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1] + "…"
+
+
+def _list_schedule_rows(
+    questions: list[dict[str, Any]],
+    prompts: list[dict[str, Any]],
+) -> list[list[str]]:
+    now = dt.datetime.now(TZ)
+    rows: list[list[str]] = []
+    for q in questions:
+        nxt = croniter(q["cron"], now).get_next(dt.datetime)
+        rows.append(
+            [
+                "Question",
+                q["id"],
+                q["type"],
+                _truncate(q["text"], 80),
+                q["cron"],
+                nxt.strftime("%Y-%m-%d %H:%M"),
+                f"{q['timeout_minutes']}m",
+            ]
+        )
+    for p in prompts:
+        nxt = croniter(p["cron"], now).get_next(dt.datetime)
+        rows.append(
+            [
+                "Prompt",
+                p["id"],
+                "-",
+                _truncate(p["prompt"], 60),
+                p["cron"],
+                nxt.strftime("%Y-%m-%d %H:%M"),
+                "-",
+            ]
+        )
+    return rows
+
+
 async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     questions = db.list_questions(active_only=True)
     prompts = db.list_scheduled_prompts(active_only=True)
     if not questions and not prompts:
         await update.message.reply_text("Aktif soru veya scheduled prompt yok.")
         return
-    parts: list[str] = []
-    if questions:
-        parts.append("📋 Sorular:")
-        for q in questions:
-            nxt = croniter(q["cron"], dt.datetime.now(TZ)).get_next(dt.datetime)
-            parts.append(
-                f"• {q['id']} ({q['type']})\n"
-                f"  {q['text']}\n"
-                f"  cron: {q['cron']} → {nxt:%Y-%m-%d %H:%M} | timeout: {q['timeout_minutes']}dk"
-            )
-    if prompts:
-        parts.append("\n⏰ Scheduled prompts:")
-        for p in prompts:
-            nxt = croniter(p["cron"], dt.datetime.now(TZ)).get_next(dt.datetime)
-            preview = p["prompt"][:60] + ("…" if len(p["prompt"]) > 60 else "")
-            parts.append(f"• {p['id']} | {p['cron']} → {nxt:%Y-%m-%d %H:%M}\n  {preview}")
-    await update.message.reply_text("\n".join(parts))
+    await reply_table(
+        update.message,
+        ["Kind", "ID", "Type", "Text", "Cron", "Next", "Timeout"],
+        _list_schedule_rows(questions, prompts),
+        caption="Aktif sorular ve scheduled prompts",
+        path_prefix="list",
+    )
 
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -281,14 +340,33 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if df.empty:
         await update.message.reply_text("Henüz veri yok.")
         return
-    lines = ["📊 İstatistikler\n"]
     scales = df[df.qtype == "scale"].copy()
     if not scales.empty:
         scales["num"] = pd.to_numeric(scales.answer, errors="coerce")
-        for qid, g in scales.groupby("qid"):
-            lines.append(f"{qid} ortalama: {g.num.mean():.1f}  (n={len(g)})")
-    lines.append(f"\nToplam kayıt: {len(df)} | Gün sayısı: {df.day.nunique()}")
-    await update.message.reply_text("\n".join(lines))
+        scale_rows = [
+            [qid, f"{g.num.mean():.1f}", str(len(g))]
+            for qid, g in scales.groupby("qid")
+        ]
+        scale_rows.append(["Toplam kayıt", str(len(df)), ""])
+        scale_rows.append(["Gün sayısı", str(df.day.nunique()), ""])
+        await reply_table(
+            update.message,
+            ["Question", "Average", "n"],
+            scale_rows,
+            caption="İstatistikler",
+            path_prefix="stats",
+        )
+    else:
+        await reply_table(
+            update.message,
+            ["Metric", "Value"],
+            [
+                ["Toplam kayıt", str(len(df))],
+                ["Gün sayısı", str(df.day.nunique())],
+            ],
+            caption="İstatistikler",
+            path_prefix="stats",
+        )
 
     if not scales.empty:
         fig, ax = plt.subplots(figsize=(8, 4))
