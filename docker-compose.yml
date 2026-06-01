@@ -1,0 +1,12 @@
+services:
+  bot:
+    build: .
+    container_name: quizbot
+    env_file:
+      - .env
+    restart: unless-stopped
+    volumes:
+      - quizbot_data:/data
+
+volumes:
+  quizbot_data:

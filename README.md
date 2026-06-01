@@ -51,14 +51,9 @@ python bot.py
 
 ## 3) Docker
 ```bash
-docker build -t telegram-quizbot .
-docker run -d --name quizbot \
-  --env-file .env \
-  -v "$PWD/data:/data" \
-  --restart unless-stopped \
-  telegram-quizbot
+docker compose up -d --build
 ```
-The `/data` volume holds `answers.db`.
+The named volume `quizbot_data` mounted at `/data` holds `answers.db`.
 The container runs as a non-root user inside the image.
 
 On first boot, if the DB is empty, `questions.json` is loaded as a seed.
