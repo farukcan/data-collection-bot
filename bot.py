@@ -34,6 +34,7 @@ import os
 import db
 from agent import (
     build_agent,
+    clear_history,
     invoke_agent,
     push_history,
     scheduled_prompt_invocation_text,
@@ -211,7 +212,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Chat ID: {update.effective_chat.id}\n\n"
         "/ask [qid] → soru(ları) şimdi gönder\n"
         "/list → aktif soruları listele\n"
-        "/stats → istatistikler\n\n"
+        "/stats → istatistikler\n"
+        "/clear → LLM sohbet geçmişini sıfırla\n\n"
         "Düz metin yazarsan LLM agent cevaplar (CRUD, sorgu, SQL, scheduled prompts)."
     )
 
@@ -264,6 +266,13 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             preview = p["prompt"][:60] + ("…" if len(p["prompt"]) > 60 else "")
             parts.append(f"• {p['id']} | {p['cron']} → {nxt:%Y-%m-%d %H:%M}\n  {preview}")
     await update.message.reply_text("\n".join(parts))
+
+
+async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    clear_history(context.bot_data)
+    await update.message.reply_text(
+        "LLM sohbet geçmişi sıfırlandı. Sonraki mesajlar önceki konuşmayı görmez."
+    )
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -445,6 +454,7 @@ def main() -> None:
     app.add_handler(CommandHandler("ask", cmd_ask, filters=owner))
     app.add_handler(CommandHandler("list", cmd_list, filters=owner))
     app.add_handler(CommandHandler("stats", cmd_stats, filters=owner))
+    app.add_handler(CommandHandler("clear", cmd_clear, filters=owner))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(
         MessageHandler(

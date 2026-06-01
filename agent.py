@@ -103,6 +103,12 @@ def push_history(bot_data: dict[str, Any], role: str, content: str) -> None:
     bot_data["history_last_ts"] = dt.datetime.now(TZ)
 
 
+def clear_history(bot_data: dict[str, Any]) -> None:
+    """Drop Telegram LLM chat history so the next message starts a fresh session."""
+    bot_data["history"] = []
+    bot_data.pop("history_last_ts", None)
+
+
 # ---------- tools ----------
 def build_tools(
     reschedule_question: Callable[[str], None],

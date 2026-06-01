@@ -76,7 +76,8 @@ Any plain-text message from the owner triggers the agent. Tools:
 When CRUD tools change the DB the scheduler auto-resyncs (no restart needed).
 
 Chat memory: keeps the last 20 turns, and resets if more than 1 hour has
-passed since the previous message. MCP sessions use the same limit/reset rules.
+passed since the previous message. Use `/clear` to reset immediately. MCP
+sessions use the same limit/reset rules (Telegram `/clear` does not affect MCP).
 
 ### LLM providers
 `LLM_PROVIDER` env: `openai` (default) | `anthropic` | `ollama`.
@@ -93,6 +94,7 @@ Default models per provider:
 - `/list` — active questions + scheduled prompts + next cron run
 - `/ask [qid]` — trigger manually (no qid → all)
 - `/stats` — summary plus a scale-trend chart
+- `/clear` — reset Telegram LLM chat history (next message starts a fresh session)
 
 All commands respond only to the configured `CHAT_ID`; other senders are
 ignored silently.
