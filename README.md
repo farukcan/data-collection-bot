@@ -59,6 +59,7 @@ docker run -d --name quizbot \
   telegram-quizbot
 ```
 The `/data` volume holds `answers.db`.
+The container runs as a non-root user inside the image.
 
 On first boot, if the DB is empty, `questions.json` is loaded as a seed.
 After that, the DB is the canonical source.
