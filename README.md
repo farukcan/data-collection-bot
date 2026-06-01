@@ -74,6 +74,7 @@ Any plain-text message from the owner triggers the agent. Tools:
 | `query_answers` / `delete_answer` | filter and remove answers |
 | `list_scheduled_prompts` / `add_scheduled_prompt` / `update_scheduled_prompt` / `delete_scheduled_prompt` | scheduled prompt CRUD |
 | `run_sql` | raw SQL (single statement) |
+| `run_python` | Python execution for analytics and chart generation (`pd`, `plt`, `db` available) |
 | `now` | current date-time in the bot's timezone |
 
 When CRUD tools change the DB the scheduler auto-resyncs (no restart needed).
@@ -180,3 +181,5 @@ picks up the change (agent tools auto-resync; raw SQL does not).
 - The `run_sql` tool is not sandboxed — DROP/TRUNCATE/DELETE are possible
   despite warnings in the agent prompt. Acceptable for a single-user
   personal bot.
+- The `run_python` tool executes arbitrary Python code and is also not
+  sandboxed. Keep the bot owner-only and do not expose MCP publicly.
