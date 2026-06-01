@@ -32,7 +32,13 @@ from telegram.ext import (
 import os
 
 import db
-from agent import build_agent, invoke_agent, push_history, trim_history
+from agent import (
+    build_agent,
+    invoke_agent,
+    push_history,
+    scheduled_prompt_invocation_text,
+    trim_history,
+)
 from config import BOT_TOKEN, CHAT_ID, DB, MCP_TOKEN, TIMEZONE, TZ
 from mcp_server import serve as serve_mcp
 
@@ -146,7 +152,11 @@ async def scheduled_prompt_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     agent_lock: asyncio.Lock = context.bot_data["agent_lock"]
     try:
         async with agent_lock:
-            reply, images = await invoke_agent(agent, history=[], user_text=p["prompt"])
+            reply, images = await invoke_agent(
+                agent,
+                history=[],
+                user_text=scheduled_prompt_invocation_text(p["prompt"]),
+            )
     except Exception as exc:
         log.exception("scheduled_prompt %s failed", pid)
         await context.bot.send_message(CHAT_ID, f"⚠️ Scheduled prompt {pid} hata: {exc}")

@@ -30,6 +30,16 @@ _pending_images: contextvars.ContextVar[list[str]] = contextvars.ContextVar(
 
 log = logging.getLogger("quizbot.agent")
 
+SCHEDULED_PROMPT_INVOCATION_HEADER = (
+    "Zamanlanmış görev talimatı (bunu uygula, sonucu bot sahibine raporla):\n"
+)
+
+
+def scheduled_prompt_invocation_text(instruction: str) -> str:
+    """Wrap a stored scheduled-prompt instruction for cron-time agent invocation."""
+    return SCHEDULED_PROMPT_INVOCATION_HEADER + instruction.strip()
+
+
 SYSTEM_PROMPT = """Sen bir veri toplama (self-tracking) Telegram botunun beynisin.
 Bot sahibi periyodik sorularla mood, uyku, egzersiz gibi günlük veriler topluyor.
 Doğru/yanlış kavramı YOK — sadece veri topluyoruz.
@@ -61,6 +71,10 @@ Kural:
   cron 5-alanlı: "m h dom mon dow"
 - answers(id, ts, day, qid, qtype, answer)
 - scheduled_prompts(id, prompt, cron, active)
+  prompt: her zaman LLM'e verilecek bir TALİMAT (emir kipi, yapılacak iş).
+  Soru veya sohbet cümlesi değil. Örnek: "Son 7 günün mood ortalamasını
+  hesapla ve kısa özet yaz." add_scheduled_prompt / update (prompt) ile
+  eklerken metni bu formatta yaz.
 
 Türkçe yanıt ver, kısa ol. Belirsizlikte sor. DROP/DELETE-WHERE'siz gibi
 tehlikeli SQL'de önce onay iste. Tool sonuçlarını yorumla, ham JSON dökme.
@@ -171,15 +185,19 @@ def build_tools(
 
     @tool
     def add_scheduled_prompt(pid: str, prompt: str, cron: str) -> str:
-        """Yeni zamanlanmış prompt ekle. Cron tickte LLM bu prompt'u çalıştırıp
-        kullanıcıya yanıt gönderir. Genelde istatistik/özet için kullanılır."""
+        """Yeni zamanlanmış prompt görevi ekle. Cron tickte LLM talimatı uygular.
+
+        prompt: LLM'e verilecek talimat metni (emir kipi). Soru değil.
+        Örnek: "Son 7 günün uyku ve mood verilerini özetle."
+        """
         db.insert_scheduled_prompt(pid, prompt, cron, active=1)
         reschedule_prompt(pid)
         return f"added {pid}"
 
     @tool
     def update_scheduled_prompt(pid: str, fields_json: str) -> str:
-        """Zamanlanmış prompt'u güncelle. fields_json: {"prompt":"...","cron":"...","active":1}"""
+        """Zamanlanmış prompt'u güncelle. fields_json: {"prompt":"...","cron":"...","active":1}
+        prompt alanı değişirse yeni metin de talimat (emir kipi) olmalı."""
         fields = json.loads(fields_json)
         n = db.update_scheduled_prompt(pid, fields)
         if n == 0:

@@ -16,9 +16,10 @@ naming is misleading: there is no right/wrong — it just records data.
 - **Questions** (`questions`): each has its own cron and timeout. If no answer
   arrives in time, the prompt message is deleted.
 - **Answers** (`answers`): stored in SQLite.
-- **Scheduled prompts** (`scheduled_prompts`): cron-driven LLM prompts whose
-  output is sent back to the owner. Typically used for recurring reports
-  ("give me a weekly summary").
+- **Scheduled prompts** (`scheduled_prompts`): cron-driven LLM **instructions**
+  whose output is sent back to the owner. The `prompt` column must be an
+  imperative task for the agent (e.g. "Summarize the last 7 days of mood data"),
+  not a chat question. Typically used for recurring reports.
 - **LLM agent**: replies to the owner's free-form messages, performs CRUD
   through tools, runs SQL, and manages scheduled prompts.
 

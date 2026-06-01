@@ -211,6 +211,18 @@ def delete_answer(answer_id: int) -> int:
 
 
 # ---------- scheduled_prompts ----------
+def normalize_scheduled_prompt_instruction(prompt: str) -> str:
+    """Return trimmed instruction text for scheduled_prompts.prompt.
+
+    The prompt column stores imperative LLM instructions (what to do on each
+    cron tick), not conversational questions or chat framing.
+    """
+    text = prompt.strip()
+    if not text:
+        raise ValueError("scheduled prompt instruction cannot be empty")
+    return text
+
+
 def list_scheduled_prompts(active_only: bool) -> list[dict[str, Any]]:
     sql = "SELECT * FROM scheduled_prompts"
     if active_only:
@@ -227,10 +239,11 @@ def get_scheduled_prompt(pid: str) -> Optional[dict[str, Any]]:
 
 
 def insert_scheduled_prompt(pid: str, prompt: str, cron: str, active: int) -> None:
+    instruction = normalize_scheduled_prompt_instruction(prompt)
     with connect() as con:
         con.execute(
             "INSERT INTO scheduled_prompts (id, prompt, cron, active) VALUES (?,?,?,?)",
-            (pid, prompt, cron, active),
+            (pid, instruction, cron, active),
         )
 
 
@@ -241,6 +254,8 @@ def update_scheduled_prompt(pid: str, fields: dict[str, Any]) -> int:
     for k, v in fields.items():
         if k not in allowed:
             raise ValueError(f"Field not updatable: {k}")
+        if k == "prompt":
+            v = normalize_scheduled_prompt_instruction(v)
         sets.append(f"{k}=?")
         params.append(v)
     if not sets:
