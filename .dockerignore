@@ -1,0 +1,13 @@
+.git
+.gitignore
+.DS_Store
+__pycache__
+*.pyc
+venv
+.env
+.env.example
+answers.db
+trend.png
+README.md
+Dockerfile
+.dockerignore

@@ -1,0 +1,37 @@
+{
+  "questions": [
+    {
+      "id": "mood",
+      "type": "scale",
+      "text": "Bugün ruh halin nasıl?",
+      "min": 1,
+      "max": 5,
+      "labels": {"1": "Çok kötü", "5": "Harika"},
+      "cron": "0 9 * * *",
+      "timeout_minutes": 60
+    },
+    {
+      "id": "sleep_hours",
+      "type": "rating",
+      "text": "Dün kaç saat uyudun?",
+      "options": ["<5", "5-6", "6-7", "7-8", "8+"],
+      "cron": "0 9 * * *",
+      "timeout_minutes": 60
+    },
+    {
+      "id": "exercise",
+      "type": "choice",
+      "text": "Bugün egzersiz yaptın mı?",
+      "options": ["Evet", "Hayır", "Planlıyorum"],
+      "cron": "0 20 * * *",
+      "timeout_minutes": 120
+    },
+    {
+      "id": "note",
+      "type": "open",
+      "text": "Bugünle ilgili bir not eklemek ister misin?",
+      "cron": "0 22 * * *",
+      "timeout_minutes": 60
+    }
+  ]
+}
