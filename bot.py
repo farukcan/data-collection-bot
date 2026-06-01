@@ -2,6 +2,7 @@
 """Telegram data-collection bot with per-question cron, timeouts, and an LLM
 agent that can manage questions, answers, and scheduled prompts."""
 import asyncio
+import contextlib
 import datetime as dt
 import logging
 from pathlib import Path
@@ -142,8 +143,10 @@ async def scheduled_prompt_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not p or not p["active"]:
         return
     agent = context.bot_data["agent"]
+    agent_lock: asyncio.Lock = context.bot_data["agent_lock"]
     try:
-        reply, images = await invoke_agent(agent, history=[], user_text=p["prompt"])
+        async with agent_lock:
+            reply, images = await invoke_agent(agent, history=[], user_text=p["prompt"])
     except Exception as exc:
         log.exception("scheduled_prompt %s failed", pid)
         await context.bot.send_message(CHAT_ID, f"⚠️ Scheduled prompt {pid} hata: {exc}")
@@ -340,10 +343,12 @@ async def on_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not text.strip():
         return
     agent = context.bot_data["agent"]
+    agent_lock: asyncio.Lock = context.bot_data["agent_lock"]
     history = trim_history(context.bot_data)
     await context.bot.send_chat_action(msg.chat_id, "typing")
     try:
-        reply, images = await invoke_agent(agent, history=list(history), user_text=text)
+        async with agent_lock:
+            reply, images = await invoke_agent(agent, history=list(history), user_text=text)
     except Exception as exc:
         log.exception("agent invocation failed")
         await msg.reply_text(f"⚠️ Agent hata: {exc}")
@@ -372,19 +377,49 @@ def main() -> None:
     if seeded:
         log.info("Seeded %d questions from questions.json", seeded)
 
+    def _on_mcp_task_done(task: asyncio.Task) -> None:
+        if task.cancelled():
+            log.info("MCP SSE server task cancelled")
+            return
+        exc = task.exception()
+        if exc:
+            log.exception("MCP SSE server task failed", exc_info=exc)
+            return
+        log.info("MCP SSE server task exited cleanly")
+
     async def post_init(application: Application) -> None:
         if not MCP_TOKEN:
             log.info("MCP_TOKEN unset — MCP SSE server not started")
             return
         # Hold the task reference on bot_data so the GC can't collect it
         # mid-flight and silently swallow uvicorn errors.
-        application.bot_data["mcp_task"] = asyncio.create_task(
-            serve_mcp(application.bot_data["agent"]),
+        mcp_task = asyncio.create_task(
+            serve_mcp(
+                application.bot_data["agent"],
+                agent_lock=application.bot_data["agent_lock"],
+            ),
             name="mcp-sse-server",
         )
+        mcp_task.add_done_callback(_on_mcp_task_done)
+        application.bot_data["mcp_task"] = mcp_task
         log.info("MCP SSE server task scheduled")
 
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    async def post_shutdown(application: Application) -> None:
+        mcp_task: asyncio.Task | None = application.bot_data.get("mcp_task")
+        if not mcp_task:
+            return
+        if not mcp_task.done():
+            mcp_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await mcp_task
+
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
 
     # Tool callbacks need the job_queue from the running Application.
     job_queue = app.job_queue
@@ -393,6 +428,7 @@ def main() -> None:
         reschedule_prompt=lambda pid: schedule_prompt(job_queue, pid),
     )
     app.bot_data["agent"] = agent
+    app.bot_data["agent_lock"] = asyncio.Lock()
 
     owner = filters.Chat(CHAT_ID)
     app.add_handler(CommandHandler("start", cmd_start, filters=owner))

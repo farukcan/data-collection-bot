@@ -8,8 +8,10 @@ Auth: Bearer token via the MCP_TOKEN env var, checked by a pure ASGI
 middleware in front of the SSE app. BaseHTTPMiddleware cannot be used here
 because it buffers response bodies and breaks text/event-stream.
 """
+import asyncio
 import base64
 import logging
+import secrets
 import weakref
 from pathlib import Path
 from typing import Any
@@ -18,16 +20,14 @@ import uvicorn
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ImageContent, TextContent
 
-from agent import invoke_agent
+from agent import invoke_agent, push_history, trim_history
 from config import MCP_HOST, MCP_PORT, MCP_TOKEN
 
 log = logging.getLogger("quizbot.mcp")
 
 # Per-SSE-session history. WeakKeyDictionary: when the session object is GC'd
 # (client disconnect), its entry vanishes automatically. No id() reuse risk.
-_sessions: "weakref.WeakKeyDictionary[Any, list[dict[str, str]]]" = (
-    weakref.WeakKeyDictionary()
-)
+_sessions: "weakref.WeakKeyDictionary[Any, dict[str, Any]]" = weakref.WeakKeyDictionary()
 
 
 def _image_blocks_from_paths(paths: list[str]) -> list[ImageContent]:
@@ -54,7 +54,7 @@ def _image_blocks_from_paths(paths: list[str]) -> list[ImageContent]:
     return blocks
 
 
-def build_mcp(agent: Any) -> FastMCP:
+def build_mcp(agent: Any, agent_lock: asyncio.Lock | None = None) -> FastMCP:
     mcp = FastMCP("data-collection-bot")
 
     @mcp.tool(
@@ -67,15 +67,22 @@ def build_mcp(agent: Any) -> FastMCP:
     )
     async def ask_agent(prompt: str, ctx: Context) -> list:
         session = ctx.request_context.session
-        history = _sessions.get(session)
-        if history is None:
-            history = []
-            _sessions[session] = history
-        reply, images = await invoke_agent(
-            agent, history=list(history), user_text=prompt
-        )
-        history.append({"role": "user", "content": prompt})
-        history.append({"role": "assistant", "content": reply})
+        state = _sessions.get(session)
+        if state is None:
+            state = {}
+            _sessions[session] = state
+        history = trim_history(state)
+        if agent_lock is None:
+            reply, images = await invoke_agent(
+                agent, history=list(history), user_text=prompt
+            )
+        else:
+            async with agent_lock:
+                reply, images = await invoke_agent(
+                    agent, history=list(history), user_text=prompt
+                )
+        push_history(state, "user", prompt)
+        push_history(state, "assistant", reply)
 
         blocks: list = [TextContent(type="text", text=reply or "")]
         blocks.extend(_image_blocks_from_paths(images))
@@ -101,7 +108,7 @@ class BearerAuthASGI:
             return
         authorized = False
         for name, value in scope.get("headers", ()):
-            if name == b"authorization" and value == self._expected:
+            if name == b"authorization" and secrets.compare_digest(value, self._expected):
                 authorized = True
                 break
         if not authorized:
@@ -117,10 +124,10 @@ class BearerAuthASGI:
         await self._app(scope, receive, send)
 
 
-async def serve(agent: Any) -> None:
+async def serve(agent: Any, agent_lock: asyncio.Lock | None = None) -> None:
     if not MCP_TOKEN:
         raise RuntimeError("MCP_TOKEN env var is required to start the MCP server.")
-    mcp = build_mcp(agent)
+    mcp = build_mcp(agent, agent_lock=agent_lock)
     app = BearerAuthASGI(mcp.sse_app(), token=MCP_TOKEN)
     config = uvicorn.Config(app, host=MCP_HOST, port=MCP_PORT, log_level="info")
     server = uvicorn.Server(config)

@@ -78,7 +78,7 @@ Any plain-text message from the owner triggers the agent. Tools:
 When CRUD tools change the DB the scheduler auto-resyncs (no restart needed).
 
 Chat memory: keeps the last 20 turns, and resets if more than 1 hour has
-passed since the previous message.
+passed since the previous message. MCP sessions use the same limit/reset rules.
 
 ### LLM providers
 `LLM_PROVIDER` env: `openai` (default) | `anthropic` | `ollama`.
@@ -125,7 +125,10 @@ SSE so other agents (Claude Code, IDE clients, …) can call it.
 - Tool: `ask_agent(prompt: str)` — runs the same ReAct agent the Telegram
   bot uses. Returns text plus any matplotlib charts as image content.
 - History: each SSE connection is its own session with its own history,
-  separate from the Telegram chat history.
+  separate from the Telegram chat history. The same turn/gap limits are applied.
+- Concurrency: Telegram, scheduled prompts, and MCP calls share one agent
+  instance; agent invocations are serialized with an async lock to avoid
+  overlapping tool/SQLite execution.
 
 Example client config (Claude Code):
 ```json
