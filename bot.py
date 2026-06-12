@@ -43,7 +43,7 @@ from agent import (
     scheduled_prompt_invocation_text,
     trim_history,
 )
-from config import BOT_TOKEN, CHAT_ID, DB, MCP_TOKEN, TIMEZONE, TZ
+from config import BOT_TOKEN, CHAT_ID, MCP_TOKEN, TIMEZONE, TZ
 from mcp_server import serve as serve_mcp
 
 logging.basicConfig(
@@ -352,8 +352,7 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    with db.connect() as con:
-        df = pd.read_sql("SELECT * FROM answers", con)
+    df = db.to_df("answers")
     if df.empty:
         await update.message.reply_text("Henüz veri yok.")
         return
@@ -560,7 +559,7 @@ def main() -> None:
     )
 
     schedule_all(job_queue)
-    log.info("Bot starting (tz=%s, db=%s, owner=%s)", TIMEZONE, DB, CHAT_ID)
+    log.info("Bot starting (tz=%s, owner=%s)", TIMEZONE, CHAT_ID)
     app.run_polling()
 
 

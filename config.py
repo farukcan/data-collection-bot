@@ -14,8 +14,11 @@ CHAT_ID: Optional[int] = int(_chat) if _chat else None
 TIMEZONE: str = os.environ.get("TIMEZONE", "Europe/Istanbul")
 TZ: ZoneInfo = ZoneInfo(TIMEZONE)
 
-DB: Path = Path(os.environ.get("DB_PATH", str(Path(__file__).parent.resolve() / "answers.db")))
 SEED_FILE: Path = Path(__file__).parent.resolve() / "questions.json"
+
+PB_URL: str = os.environ.get("PB_URL")
+PB_EMAIL: str = os.environ["PB_EMAIL"]
+PB_PASSWORD: str = os.environ["PB_PASSWORD"]
 
 LLM_PROVIDER: str = os.environ.get("LLM_PROVIDER", "openai")
 _MODEL_DEFAULTS = {

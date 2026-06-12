@@ -1,4 +1,4 @@
-"""LangChain ReAct agent with tools for questions, answers, scheduled prompts, raw SQL, and Python execution."""
+"""LangChain ReAct agent with tools for questions, answers, scheduled prompts, and Python execution."""
 import contextlib
 import contextvars
 import datetime as dt
@@ -49,7 +49,6 @@ Yapabildiklerin:
 - Sorular (questions) üzerinde CRUD
 - Cevaplar (answers) üzerinde sorgu/filtreleme/silme
 - Zamanlanmış prompt görevleri (scheduled_prompts) üzerinde CRUD
-- Gerektiğinde ham SQL çalıştır (run_sql)
 - Python kodu çalıştır (run_python): hesaplama, veri işleme ve grafik üretimi için
   ana aracın. pandas (pd), matplotlib (plt) ve db modülü hazır. Her türlü
   ortalama/medyan/yüzde/trend/korelasyon vs. işini Python'da yap; sonuçları
@@ -62,7 +61,6 @@ Kural:
 - Hesaplama, aggregation, istatistik → run_python (print ile)
 - Tablo / sütunlu liste gösterme → run_python + send_table(headers, rows)
 - Grafik → run_python + plt
-- Sadece SQL'le çözülecek özel durumlar → run_sql
 
 Şema:
 - questions(id, type, text, config, cron, timeout_minutes, active)
@@ -74,14 +72,14 @@ Kural:
     open   → {}
   cron 5-alanlı: "m h dom mon dow"
 - answers(id, ts, day, qid, qtype, answer)
+  id: string (PocketBase auto-id, 15 karakter)
 - scheduled_prompts(id, prompt, cron, active)
   prompt: her zaman LLM'e verilecek bir TALİMAT (emir kipi, yapılacak iş).
   Soru veya sohbet cümlesi değil. Örnek: "Son 7 günün mood ortalamasını
   hesapla ve kısa özet yaz." add_scheduled_prompt / update (prompt) ile
   eklerken metni bu formatta yaz.
 
-Türkçe yanıt ver, kısa ol. Belirsizlikte sor. DROP/DELETE-WHERE'siz gibi
-tehlikeli SQL'de önce onay iste. Tool sonuçlarını yorumla, ham JSON dökme.
+Türkçe yanıt ver, kısa ol. Belirsizlikte sor. Tool sonuçlarını yorumla, ham JSON dökme.
 
 ÖNEMLİ: Yanıtlarında markdown veya HTML formatlama kullanma. Sadece düz
 metin yaz. Backtick, yıldız, alt çizgi, köşeli parantez yok. Listeler için
@@ -199,8 +197,8 @@ def build_tools(
         return json.dumps(rows, ensure_ascii=False, default=str)
 
     @tool
-    def delete_answer(answer_id: int) -> str:
-        """Tek cevabı id ile sil."""
+    def delete_answer(answer_id: str) -> str:
+        """Tek cevabı id ile sil. id string'dir (PocketBase auto-id, 15 karakter)."""
         return f"deleted {db.delete_answer(answer_id)}"
 
     @tool
@@ -238,13 +236,6 @@ def build_tools(
         return f"deleted {n}"
 
     @tool
-    def run_sql(query: str) -> str:
-        """Tek deyimlik ham SQL çalıştır. Tablolar: questions, answers, scheduled_prompts.
-        SELECT için satırlar, write için rowcount döner."""
-        result = db.run_sql(query)
-        return json.dumps(result, ensure_ascii=False, default=str)
-
-    @tool
     def now() -> str:
         """Şu anki tarih-saat (botun timezone'unda)."""
         return dt.datetime.now(TZ).isoformat(timespec="seconds")
@@ -255,7 +246,7 @@ def build_tools(
         Her çağrı bağımsızdır (state taşınmaz).
 
         Hazır isimler: pd (pandas), plt (matplotlib.pyplot), db (modül), now_tz.
-        Veri çekme: con = db.connect(); df = pd.read_sql('SELECT ...', con).
+        Veri çekme: df = db.to_df("answers")  # veya "questions", "scheduled_prompts"
 
         Çıktı:
         - Sayı/text özet için print(...) kullan; stdout sana geri döner.
@@ -317,7 +308,6 @@ def build_tools(
         add_scheduled_prompt,
         update_scheduled_prompt,
         delete_scheduled_prompt,
-        run_sql,
         run_python,
         now,
     ]
