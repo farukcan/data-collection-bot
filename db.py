@@ -272,6 +272,16 @@ def delete_scheduled_prompt(pid: str) -> int:
         return cur.rowcount
 
 
+# ---------- dump ----------
+def dump_all() -> dict[str, Any]:
+    """Return all rows from every table as plain dicts, suitable for JSON serialization."""
+    with connect() as con:
+        questions = [_row_to_question(r) for r in con.execute("SELECT * FROM questions ORDER BY id").fetchall()]
+        answers = [dict(r) for r in con.execute("SELECT * FROM answers ORDER BY id").fetchall()]
+        prompts = [dict(r) for r in con.execute("SELECT * FROM scheduled_prompts ORDER BY id").fetchall()]
+    return {"questions": questions, "answers": answers, "scheduled_prompts": prompts}
+
+
 # ---------- raw sql ----------
 def run_sql(query: str) -> dict[str, Any]:
     """Single-statement SQL. Returns {'rows': [...]} for SELECT, {'rowcount': N} otherwise."""

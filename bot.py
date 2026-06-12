@@ -4,7 +4,9 @@ agent that can manage questions, answers, and scheduled prompts."""
 import asyncio
 import contextlib
 import datetime as dt
+import json
 import logging
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
@@ -238,6 +240,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             ["/ask [qid]", "Soru(ları) şimdi gönder"],
             ["/list", "Aktif sorular ve scheduled prompts"],
             ["/stats", "İstatistikler"],
+            ["/dump", "Tüm veritabanını JSON olarak indir"],
             ["/clear", "LLM sohbet geçmişini sıfırla"],
             ["(metin)", "LLM agent: CRUD, sorgu, SQL, scheduled prompts"],
         ],
@@ -325,6 +328,20 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         caption="Aktif sorular ve scheduled prompts",
         path_prefix="list",
     )
+
+
+async def cmd_dump(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    data = db.dump_all()
+    payload = json.dumps(data, ensure_ascii=False, indent=2, default=str)
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+            tmp.write(payload.encode("utf-8"))
+            tmp_path = Path(tmp.name)
+        with tmp_path.open("rb") as fp:
+            await update.message.reply_document(fp, filename="db_dump.json")
+    finally:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
 
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -532,6 +549,7 @@ def main() -> None:
     app.add_handler(CommandHandler("ask", cmd_ask, filters=owner))
     app.add_handler(CommandHandler("list", cmd_list, filters=owner))
     app.add_handler(CommandHandler("stats", cmd_stats, filters=owner))
+    app.add_handler(CommandHandler("dump", cmd_dump, filters=owner))
     app.add_handler(CommandHandler("clear", cmd_clear, filters=owner))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(
