@@ -67,6 +67,9 @@ class _PBClient:
             json={"identity": self._email, "password": self._password},
             timeout=10,
         )
+        if not resp.ok:
+            # Body reveals whether the block came from PocketBase (JSON) or a proxy like Cloudflare (HTML)
+            log.error("PB auth failed (%s): %s", resp.status_code, resp.text[:500])
         resp.raise_for_status()
         self._token = resp.json()["token"]
 
