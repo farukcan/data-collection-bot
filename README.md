@@ -4,24 +4,42 @@
 [![python-telegram-bot](https://img.shields.io/badge/python--telegram--bot-21.6-26A5E4?logo=telegram&logoColor=white)](https://github.com/python-telegram-bot/python-telegram-bot)
 [![LangChain](https://img.shields.io/badge/LangChain-0.3-1C3C3C?logo=langchain&logoColor=white)](https://www.langchain.com/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-0.2-FF6B35)](https://langchain-ai.github.io/langgraph/)
+[![PocketBase](https://img.shields.io/badge/PocketBase-0.23+-B8E986)](https://pocketbase.io/)
 [![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![SQLite](https://img.shields.io/badge/SQLite-bundled-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 A Telegram bot that regularly collects data from its owner, returns statistics,
 and can manage its own configuration through a LangChain agent. The "quiz"
 naming is misleading: there is no right/wrong — it just records data.
 
+Data is stored in **PocketBase** (three collections). On first boot the bot
+auto-creates missing collections and can seed questions from `questions.json`.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  Owner["Owner (Telegram)"] --> Bot["bot.py"]
+  MCP["MCP clients (SSE)"] --> Bot
+  Bot --> Agent["agent.py (ReAct)"]
+  Agent --> Tools["CRUD + run_python"]
+  Tools --> DB["db.py → PocketBase REST"]
+  Bot --> Scheduler["croniter job queue"]
+  Scheduler -->|questions| Owner
+  Scheduler -->|scheduled prompts| Agent
+  Agent --> Owner
+```
+
 ## Components
 - **Questions** (`questions`): each has its own cron and timeout. If no answer
   arrives in time, the prompt message is deleted.
-- **Answers** (`answers`): stored in SQLite.
+- **Answers** (`answers`): stored in PocketBase.
 - **Scheduled prompts** (`scheduled_prompts`): cron-driven LLM **instructions**
   whose output is sent back to the owner. The `prompt` column must be an
   imperative task for the agent (e.g. "Summarize the last 7 days of mood data"),
   not a chat question. Typically used for recurring reports.
 - **LLM agent**: replies to the owner's free-form messages, performs CRUD
-  through tools, runs SQL, and manages scheduled prompts.
+  through tools, runs Python analytics, and manages scheduled prompts.
 
 ## Question types
 - `scale` → numeric scale (e.g. 1-5 buttons)
@@ -31,11 +49,14 @@ naming is misleading: there is no right/wrong — it just records data.
 
 ## 1) Create the bot
 1. Open **@BotFather** in Telegram → `/newbot` → get the token.
-2. Copy `.env.example` to `.env`, fill `BOT_TOKEN`.
-3. Leave `CHAT_ID` empty for now.
-4. Run the bot, send `/start` to it from your own account → it will reply with
+2. Set up a PocketBase instance (self-hosted or existing) and create admin
+   credentials.
+3. Copy `.env.example` to `.env`, fill `BOT_TOKEN`, `PB_URL`, `PB_EMAIL`,
+   and `PB_PASSWORD`.
+4. Leave `CHAT_ID` empty for now.
+5. Run the bot, send `/start` to it from your own account → it will reply with
    your chat id.
-5. Put that id into `.env` as `CHAT_ID`, add the LLM provider + key, then
+6. Put that id into `.env` as `CHAT_ID`, add the LLM provider + key, then
    **restart** the bot.
 
 While `CHAT_ID` is empty the bot only echoes the caller's chat id and does
@@ -54,11 +75,11 @@ python bot.py
 ```bash
 docker compose up -d --build
 ```
-The named volume `quizbot_data` mounted at `/data` holds `answers.db`.
-The container runs as a non-root user inside the image.
+The container runs as a non-root user. Data lives in PocketBase (configured via
+`PB_*` env vars), not inside the container.
 
-On first boot, if the DB is empty, `questions.json` is loaded as a seed.
-After that, the DB is the canonical source.
+On first boot, if the `questions` collection is empty, `questions.json` is
+loaded as a seed. After that, PocketBase is the canonical source.
 
 ## 4) LLM agent
 Any plain-text message from the owner triggers the agent. Tools:
@@ -69,9 +90,11 @@ Any plain-text message from the owner triggers the agent. Tools:
 | `add_question` / `update_question` / `delete_question` | question CRUD |
 | `query_answers` / `delete_answer` | filter and remove answers |
 | `list_scheduled_prompts` / `add_scheduled_prompt` / `update_scheduled_prompt` / `delete_scheduled_prompt` | scheduled prompt CRUD |
-| `run_sql` | raw SQL (single statement) |
 | `run_python` | Python execution for analytics, charts (`plt`), and tables (`send_table`; `pd`, `db` available) |
 | `now` | current date-time in the bot's timezone |
+
+`query_answers` supports day-level filters (`since_day` / `until_day`) and
+timestamp-level filters (`since_ts` / `until_ts`, ISO 8601).
 
 When CRUD tools change the DB the scheduler auto-resyncs (no restart needed).
 
@@ -94,6 +117,7 @@ Default models per provider:
 - `/list` — table image of active questions + scheduled prompts (next cron run)
 - `/ask [qid]` — trigger manually (no qid → all)
 - `/stats` — summary table image plus a scale-trend chart when applicable
+- `/dump` — download the full database as `db_dump.json`
 - `/clear` — reset Telegram LLM chat history (next message starts a fresh session)
 
 All commands respond only to the configured `CHAT_ID`; other senders are
@@ -106,7 +130,9 @@ ignored silently.
 | `BOT_TOKEN` | — | required |
 | `CHAT_ID` | empty | owner-only filter; empty = id-only mode |
 | `TIMEZONE` | `Europe/Istanbul` | IANA tz used for cron + display |
-| `DB_PATH` | `./answers.db` | SQLite file path |
+| `PB_URL` | — | PocketBase base URL (e.g. `https://pb.example.com`) |
+| `PB_EMAIL` | — | PocketBase admin email |
+| `PB_PASSWORD` | — | PocketBase admin password |
 | `LLM_PROVIDER` | `openai` | `openai` / `anthropic` / `ollama` |
 | `LLM_MODEL` | provider default | override |
 | `OPENAI_API_KEY` | — | required when provider = openai |
@@ -129,7 +155,7 @@ SSE so other agents (Claude Code, IDE clients, …) can call it.
   separate from the Telegram chat history. The same turn/gap limits are applied.
 - Concurrency: Telegram, scheduled prompts, and MCP calls share one agent
   instance; agent invocations are serialized with an async lock to avoid
-  overlapping tool/SQLite execution.
+  overlapping tool/PocketBase execution.
 
 Example client config (Claude Code):
 ```json
@@ -144,41 +170,59 @@ Example client config (Claude Code):
 }
 ```
 
-## 8) Schema (manual SQL access)
-```sql
-CREATE TABLE questions (
-  id TEXT PK, type TEXT, text TEXT,
-  config TEXT,        -- JSON
-  cron TEXT, timeout_minutes INTEGER, active INTEGER
-);
-CREATE TABLE answers (
-  id INTEGER PK AUTOINCREMENT,
-  ts TEXT, day TEXT, qid TEXT, qtype TEXT, answer TEXT
-);
-CREATE TABLE scheduled_prompts (
-  id TEXT PK, prompt TEXT, cron TEXT, active INTEGER
-);
-```
+## 8) Schema (PocketBase collections)
+The bot auto-creates these collections on startup if they do not exist.
+
+### `questions`
+| Field | Type | Notes |
+|---|---|---|
+| `slug` | text | human-readable id (exposed as `id` in the API) |
+| `type` | text | `scale` / `rating` / `choice` / `open` |
+| `text` | text | prompt shown to the owner |
+| `config` | json | type-specific options |
+| `cron` | text | 5-field cron expression |
+| `timeout_minutes` | number | unanswered prompt deletion delay |
+| `active` | bool | whether the question is scheduled |
+
 `config` examples:
 - `scale`: `{"min":1,"max":5,"labels":{"1":"...","5":"..."}}`
 - `rating`/`choice`: `{"options":["a","b","c"]}`
 - `open`: `{}`
 
-If you mutate the DB through direct SQL, restart the bot so the scheduler
-picks up the change (agent tools auto-resync; raw SQL does not).
+### `answers`
+| Field | Type | Notes |
+|---|---|---|
+| `id` | auto | PocketBase record id (15-char string) |
+| `ts` | text | ISO 8601 timestamp |
+| `day` | text | `YYYY-MM-DD` |
+| `qid` | text | question slug |
+| `qtype` | text | question type at answer time |
+| `answer` | text | stored value |
+
+### `scheduled_prompts`
+| Field | Type | Notes |
+|---|---|---|
+| `slug` | text | human-readable id (exposed as `id` in the API) |
+| `prompt` | text | imperative LLM instruction |
+| `cron` | text | 5-field cron expression |
+| `active` | bool | whether the prompt is scheduled |
+
+PocketBase v0.23+ requires record ids to be at least 15 characters, so
+`questions` and `scheduled_prompts` use a `slug` field for short human-readable
+ids. All bot/agent APIs still refer to these as `id`.
+
+If you mutate PocketBase directly (admin UI or REST), restart the bot so the
+scheduler picks up the change (agent tools auto-resync; manual edits do not).
 
 ## 9) Backup
-```bash
-0 3 * * * cp data/answers.db backups/answers_$(date +\%F).db
-```
+- **Quick export:** `/dump` in Telegram → `db_dump.json` with all collections.
+- **PocketBase:** use the built-in backup/export features of your PocketBase
+  instance, or schedule periodic dumps via the PocketBase API.
 
 ## Notes
 - Open questions must be answered as a **reply** to the bot's prompt
   (ForceReply is set automatically). Plain text without a reply goes to the
   LLM agent.
 - Cron jobs missed while the bot was offline are not back-filled.
-- The `run_sql` tool is not sandboxed — DROP/TRUNCATE/DELETE are possible
-  despite warnings in the agent prompt. Acceptable for a single-user
-  personal bot.
-- The `run_python` tool executes arbitrary Python code and is also not
-  sandboxed. Keep the bot owner-only and do not expose MCP publicly.
+- The `run_python` tool executes arbitrary Python code and is not sandboxed.
+  Keep the bot owner-only and do not expose MCP publicly.
