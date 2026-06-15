@@ -83,7 +83,10 @@ class _PBClient:
             timeout=10,
             **kwargs,
         )
-        if resp.status_code == 401:
+        # An expired/invalid superuser token is treated as a guest by PocketBase,
+        # so superuser-only collections answer 403 ("Only superusers can perform
+        # this action."), not 401. Re-auth and retry once on both.
+        if resp.status_code in (401, 403):
             self._auth()
             resp = requests.request(
                 method,
