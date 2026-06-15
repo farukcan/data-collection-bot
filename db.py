@@ -7,16 +7,27 @@ All public functions accept/return the slug as `id`.
 import datetime as dt
 import json
 import logging
+import time
 from typing import Any, Optional
 
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from config import PB_EMAIL, PB_PASSWORD, PB_URL, SEED_FILE, TZ
 
 log = logging.getLogger("quizbot.db")
 
 VALID_TYPES = {"scale", "rating", "choice", "open"}
+
+# PocketBase sits behind a Cloudflare proxy, so transient 5xx/429 and network
+# blips are expected. Retry only idempotent methods at the transport level;
+# POST/PATCH stay out to avoid duplicate records (PocketBase has no idempotency key).
+_RETRY_STATUSES = (429, 500, 502, 503, 504)
+_AUTH_ATTEMPTS = 3
+_AUTH_BACKOFF = 0.5
+_TIMEOUT = 10
 
 _SCHEMAS: dict[str, list[dict[str, Any]]] = {
     "questions": [
@@ -59,28 +70,67 @@ class _PBClient:
         self._email = email
         self._password = password
         self._token: str = ""
+        self._session = requests.Session()
+        retry = Retry(
+            total=3,
+            connect=3,
+            read=3,
+            status=3,
+            backoff_factor=_AUTH_BACKOFF,
+            status_forcelist=_RETRY_STATUSES,
+            allowed_methods=frozenset({"GET", "HEAD", "OPTIONS", "DELETE"}),
+            respect_retry_after_header=True,
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        self._session.mount("https://", adapter)
+        self._session.mount("http://", adapter)
 
     def _auth(self) -> None:
-        # PocketBase v0.23+ uses _superusers collection for admin auth
-        resp = requests.post(
-            f"{self._base}/api/collections/_superusers/auth-with-password",
-            json={"identity": self._email, "password": self._password},
-            timeout=10,
-        )
-        if not resp.ok:
-            # Body reveals whether the block came from PocketBase (JSON) or a proxy like Cloudflare (HTML)
-            log.error("PB auth failed (%s): %s", resp.status_code, resp.text[:500])
-        resp.raise_for_status()
-        self._token = resp.json()["token"]
+        # PocketBase v0.23+ uses _superusers collection for admin auth.
+        # Auth is POST (excluded from transport-level status retries) yet a
+        # precondition for every request, so retry transient failures here.
+        url = f"{self._base}/api/collections/_superusers/auth-with-password"
+        payload = {"identity": self._email, "password": self._password}
+        # Use a bare requests.post (not the retrying session) so this explicit
+        # loop is the single source of retry control for auth.
+        last_exc: Exception = RuntimeError("auth never attempted")
+        for attempt in range(_AUTH_ATTEMPTS):
+            try:
+                resp = requests.post(url, json=payload, timeout=_TIMEOUT)
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                last_exc = exc
+                log.warning(
+                    "PB auth network error (attempt %d/%d): %s",
+                    attempt + 1, _AUTH_ATTEMPTS, exc,
+                )
+                time.sleep(_AUTH_BACKOFF * 2 ** attempt)
+                continue
+            if resp.status_code in _RETRY_STATUSES:
+                # Body reveals whether the block came from PocketBase (JSON) or a proxy like Cloudflare (HTML)
+                log.warning(
+                    "PB auth transient %s (attempt %d/%d): %s",
+                    resp.status_code, attempt + 1, _AUTH_ATTEMPTS, resp.text[:500],
+                )
+                last_exc = requests.HTTPError(f"{resp.status_code} on auth", response=resp)
+                time.sleep(_AUTH_BACKOFF * 2 ** attempt)
+                continue
+            if not resp.ok:
+                # Non-transient (e.g. wrong credentials): fail fast, no retry
+                log.error("PB auth failed (%s): %s", resp.status_code, resp.text[:500])
+                resp.raise_for_status()
+            self._token = resp.json()["token"]
+            return
+        raise last_exc
 
     def _req(self, method: str, path: str, **kwargs: Any) -> requests.Response:
         if not self._token:
             self._auth()
-        resp = requests.request(
+        resp = self._session.request(
             method,
             f"{self._base}{path}",
             headers={"Authorization": f"Bearer {self._token}"},
-            timeout=10,
+            timeout=_TIMEOUT,
             **kwargs,
         )
         # An expired/invalid superuser token is treated as a guest by PocketBase,
@@ -88,11 +138,11 @@ class _PBClient:
         # this action."), not 401. Re-auth and retry once on both.
         if resp.status_code in (401, 403):
             self._auth()
-            resp = requests.request(
+            resp = self._session.request(
                 method,
                 f"{self._base}{path}",
                 headers={"Authorization": f"Bearer {self._token}"},
-                timeout=10,
+                timeout=_TIMEOUT,
                 **kwargs,
             )
         resp.raise_for_status()

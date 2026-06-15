@@ -16,7 +16,7 @@ TZ: ZoneInfo = ZoneInfo(TIMEZONE)
 
 SEED_FILE: Path = Path(__file__).parent.resolve() / "questions.json"
 
-PB_URL: str = os.environ.get("PB_URL")
+PB_URL: str = os.environ["PB_URL"]
 PB_EMAIL: str = os.environ["PB_EMAIL"]
 PB_PASSWORD: str = os.environ["PB_PASSWORD"]
 
