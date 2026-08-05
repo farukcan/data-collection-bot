@@ -88,27 +88,31 @@ satır başına "• " ya da rakam yeterli.
 
 
 # ---------- conversation history ----------
-def trim_history(bot_data: dict[str, Any]) -> list[dict[str, str]]:
-    """Returns the live history list; clears it if last touch was >1h ago."""
-    last_ts: Optional[dt.datetime] = bot_data.get("history_last_ts")
-    now = dt.datetime.now(TZ)
-    if last_ts and (now - last_ts).total_seconds() > HISTORY_GAP_SECONDS:
-        bot_data["history"] = []
-    return bot_data.setdefault("history", [])
+# Stored in PocketBase (not per-process memory) so Telegram and Chainlit
+# share and continue the same conversation.
+def trim_history() -> list[dict[str, str]]:
+    """Returns recent history, newest session only; empty if last touch was >1h ago."""
+    recs = db.list_recent_chat_history(HISTORY_MAX_TURNS * 2)
+    if not recs:
+        return []
+    last_ts = dt.datetime.fromisoformat(recs[0]["ts"])
+    if (dt.datetime.now(TZ) - last_ts).total_seconds() > HISTORY_GAP_SECONDS:
+        # Wipe stale turns now, not just skip them — otherwise the next
+        # push_history would make trim_history's next call see a fresh
+        # newest ts and resurrect this stale batch alongside it.
+        db.clear_chat_history()
+        return []
+    ordered = list(reversed(recs))[-HISTORY_MAX_TURNS:]
+    return [{"role": r["role"], "content": r["content"]} for r in ordered]
 
 
-def push_history(bot_data: dict[str, Any], role: str, content: str) -> None:
-    history = bot_data.setdefault("history", [])
-    history.append({"role": role, "content": content})
-    if len(history) > HISTORY_MAX_TURNS:
-        del history[: len(history) - HISTORY_MAX_TURNS]
-    bot_data["history_last_ts"] = dt.datetime.now(TZ)
+def push_history(role: str, content: str) -> None:
+    db.save_chat_message(role, content)
 
 
-def clear_history(bot_data: dict[str, Any]) -> None:
-    """Drop Telegram LLM chat history so the next message starts a fresh session."""
-    bot_data["history"] = []
-    bot_data.pop("history_last_ts", None)
+def clear_history() -> None:
+    """Drop shared LLM chat history so the next message starts a fresh session."""
+    db.clear_chat_history()
 
 
 def _queue_table_image(headers: list[str], rows: list[list[str]]) -> str:

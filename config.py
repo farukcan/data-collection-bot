@@ -36,3 +36,8 @@ HISTORY_MAX_TURNS: int = 20
 MCP_HOST: str = os.environ.get("MCP_HOST", "127.0.0.1")
 MCP_PORT: int = int(os.environ.get("MCP_PORT", "8765"))
 MCP_TOKEN: str = os.environ.get("MCP_TOKEN", "")
+
+# Chainlit web chat auth. Optional here (bot.py doesn't need it); chainlit_app.py
+# fails fast at startup if left unset.
+CHAINLIT_AUTH_USERNAME: str = os.environ.get("CHAINLIT_AUTH_USERNAME", "")
+CHAINLIT_AUTH_PASSWORD: str = os.environ.get("CHAINLIT_AUTH_PASSWORD", "")

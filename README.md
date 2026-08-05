@@ -20,15 +20,23 @@ auto-creates missing collections and can seed questions from `questions.json`.
 ```mermaid
 flowchart LR
   Owner["Owner (Telegram)"] --> Bot["bot.py"]
+  Owner2["Owner (Chainlit web)"] --> Chainlit["chainlit_app.py"]
   MCP["MCP clients (SSE)"] --> Bot
   Bot --> Agent["agent.py (ReAct)"]
+  Chainlit --> Agent
   Agent --> Tools["CRUD + run_python"]
   Tools --> DB["db.py → PocketBase REST"]
   Bot --> Scheduler["croniter job queue"]
-  Scheduler -->|questions| Owner
+  Scheduler -->|questions + pending_questions| Owner
   Scheduler -->|scheduled prompts| Agent
   Agent --> Owner
+  Chainlit -.->|reads/answers pending_questions| DB
+  Agent -.->|chat_history| DB
 ```
+
+`bot.py` stays the sole owner of cron scheduling and answer timeouts.
+`chainlit_app.py` is a second, independent process that reads/writes the same
+PocketBase collections — it does not run its own scheduler.
 
 ## Components
 - **Questions** (`questions`): each has its own cron and timeout. If no answer
@@ -40,6 +48,13 @@ flowchart LR
   not a chat question. Typically used for recurring reports.
 - **LLM agent**: replies to the owner's free-form messages, performs CRUD
   through tools, runs Python analytics, and manages scheduled prompts.
+- **Pending questions** (`pending_questions`): tracks which question is
+  currently awaiting an answer (and its expiry), shared between Telegram and
+  Chainlit so both show the same outstanding question and stop asking once
+  either channel answers it.
+- **Chat history** (`chat_history`): the LLM conversation history, shared
+  between Telegram and Chainlit so either channel can continue the same
+  conversation.
 
 ## Question types
 - `scale` → numeric scale (e.g. 1-5 buttons)
@@ -98,9 +113,12 @@ timestamp-level filters (`since_ts` / `until_ts`, ISO 8601).
 
 When CRUD tools change the DB the scheduler auto-resyncs (no restart needed).
 
-Chat memory: keeps the last 20 turns, and resets if more than 1 hour has
-passed since the previous message. Use `/clear` to reset immediately. MCP
-sessions use the same limit/reset rules (Telegram `/clear` does not affect MCP).
+Chat memory: keeps the last 20 turns, shared between Telegram and Chainlit
+(stored in the `chat_history` collection), and resets if more than 1 hour has
+passed since the previous message. Use `/clear` (Telegram) to reset it
+immediately — this also clears it for Chainlit, since it's the same history.
+MCP sessions use the same limit/reset rules but keep their own per-connection
+history, separate from Telegram/Chainlit.
 
 ### LLM providers
 `LLM_PROVIDER` env: `openai` (default) | `anthropic` | `ollama`.
@@ -141,6 +159,9 @@ ignored silently.
 | `MCP_HOST` | `127.0.0.1` | bind host for the MCP SSE server |
 | `MCP_PORT` | `8765` | bind port for the MCP SSE server |
 | `MCP_TOKEN` | empty | Bearer token; empty disables the MCP server |
+| `CHAINLIT_AUTH_SECRET` | empty | JWT signing secret for the Chainlit session cookie; required to run `chainlit_app.py` (`chainlit create-secret`) |
+| `CHAINLIT_AUTH_USERNAME` | empty | login for the Chainlit web chat; required to run `chainlit_app.py` |
+| `CHAINLIT_AUTH_PASSWORD` | empty | password for the Chainlit web chat; required to run `chainlit_app.py` |
 
 ## 7) MCP (SSE) server
 When `MCP_TOKEN` is set, the bot also exposes its agent as an MCP server over
@@ -207,6 +228,21 @@ The bot auto-creates these collections on startup if they do not exist.
 | `cron` | text | 5-field cron expression |
 | `active` | bool | whether the prompt is scheduled |
 
+### `pending_questions`
+| Field | Type | Notes |
+|---|---|---|
+| `qid` | text | question slug |
+| `asked_at` | text | ISO 8601 timestamp |
+| `expires_at` | text | ISO 8601 timestamp; matches the question's `timeout_minutes` |
+| `status` | text | `pending` / `answered` / `expired` |
+
+### `chat_history`
+| Field | Type | Notes |
+|---|---|---|
+| `ts` | text | ISO 8601 timestamp |
+| `role` | text | `user` / `assistant` |
+| `content` | text | message content |
+
 PocketBase v0.23+ requires record ids to be at least 15 characters, so
 `questions` and `scheduled_prompts` use a `slug` field for short human-readable
 ids. All bot/agent APIs still refer to these as `id`.
@@ -218,6 +254,43 @@ scheduler picks up the change (agent tools auto-resync; manual edits do not).
 - **Quick export:** `/dump` in Telegram → `db_dump.json` with all collections.
 - **PocketBase:** use the built-in backup/export features of your PocketBase
   instance, or schedule periodic dumps via the PocketBase API.
+
+## 10) Chainlit web chat
+`chainlit_app.py` is an alternative, password-protected web chat for the same
+owner — no Telegram account needed to use it. It shares the same LLM agent,
+chat history, and pending questions with the Telegram bot; only cron
+scheduling and answer timeouts stay in `bot.py`.
+
+Setup: put `CHAINLIT_AUTH_SECRET` (from `chainlit create-secret`),
+`CHAINLIT_AUTH_USERNAME` and `CHAINLIT_AUTH_PASSWORD` in `.env`, then:
+```bash
+chainlit run chainlit_app.py --host 0.0.0.0 --port 8000
+```
+Or via `docker compose up -d --build` (starts alongside the Telegram bot,
+exposed on port 8000). `chainlit_app.py` refuses to start if any of the three
+is missing.
+
+Behavior:
+- On opening the page, any currently pending question (asked by `bot.py`'s
+  scheduler, not yet answered or expired) is offered. Answering it here marks
+  it answered in `pending_questions`, so Telegram won't prompt for it again,
+  and vice versa — whichever channel answers first wins, the other declines.
+- Chainlit holds a single "ask" slot per session, so button questions
+  (`scale` / `rating` / `choice`) are shown **one at a time**; the next appears
+  once the current one is answered or its on-screen window lapses. `open`
+  questions are queued and prompted one by one after those, since they are
+  answered as ordinary chat messages.
+- Buttons stay on screen for at most 5 minutes even when the question's
+  `timeout_minutes` is longer — an outstanding ask disables the chat input.
+  The question itself stays pending in PocketBase until answered or expired,
+  so reloading the page offers it again.
+- Any other message goes to the same LLM agent as Telegram, with the same
+  shared chat history.
+
+Known limitation: if the LLM agent adds/edits a question's cron via a
+Chainlit message, `bot.py`'s running scheduler does not pick up the change
+immediately — it does so only after its own reschedule trigger (e.g. the next
+scheduled fire, or an edit made from Telegram) or a restart.
 
 ## Notes
 - Open questions must be answered as a **reply** to the bot's prompt

@@ -8,5 +8,20 @@ services:
     volumes:
       - quizbot_data:/data
 
+  chainlit:
+    build: .
+    container_name: quizbot-chainlit
+    command: chainlit run chainlit_app.py --host 0.0.0.0 --port 8000
+    env_file:
+      - .env
+    restart: unless-stopped
+    # Not published to the host: a reverse proxy (Traefik/nginx/Cloudflare
+    # tunnel) reaches port 8000 over the Docker network and terminates TLS.
+    # Publishing it would expose the chat on http://<host>:8000 directly,
+    # bypassing the proxy — password auth over cleartext HTTP.
+    # To run it without a proxy, add:  ports: ["127.0.0.1:8000:8000"]
+    expose:
+      - "8000"
+
 volumes:
   quizbot_data:

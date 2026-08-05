@@ -52,6 +52,17 @@ _SCHEMAS: dict[str, list[dict[str, Any]]] = {
         {"name": "cron", "type": "text", "required": True},
         {"name": "active", "type": "bool"},
     ],
+    "pending_questions": [
+        {"name": "qid", "type": "text", "required": True},
+        {"name": "asked_at", "type": "text", "required": True},
+        {"name": "expires_at", "type": "text", "required": True},
+        {"name": "status", "type": "text", "required": True},
+    ],
+    "chat_history": [
+        {"name": "ts", "type": "text", "required": True},
+        {"name": "role", "type": "text", "required": True},
+        {"name": "content", "type": "text"},
+    ],
 }
 
 _PB_META = {"collectionId", "collectionName", "created", "updated"}
@@ -198,16 +209,26 @@ class _PBClient:
         for name, fields in _SCHEMAS.items():
             try:
                 self._req("GET", f"/api/collections/{name}")
+                continue
             except requests.HTTPError as exc:
                 if exc.response is None or exc.response.status_code != 404:
                     raise
-                log.info("Creating PocketBase collection: %s", name)
-                # PocketBase v0.23+ uses "fields" instead of "schema"
+            log.info("Creating PocketBase collection: %s", name)
+            # PocketBase v0.23+ uses "fields" instead of "schema"
+            try:
                 self._req(
                     "POST",
                     "/api/collections",
                     json={"name": name, "type": "base", "fields": fields},
                 )
+            except requests.HTTPError as exc:
+                # bot.py and chainlit_app.py both call init() and may boot at the
+                # same time. Losing the create race is fine as long as the
+                # collection exists afterwards; anything else is a real failure.
+                if exc.response is None or exc.response.status_code != 400:
+                    raise
+                log.info("Collection %s created concurrently; verifying", name)
+                self._req("GET", f"/api/collections/{name}")
 
 
 _client: Optional[_PBClient] = None
@@ -477,6 +498,74 @@ def delete_scheduled_prompt(pid: str) -> int:
         raise
 
 
+# ---------- pending_questions ----------
+# Tracks which question is currently awaiting an answer, shared between the
+# Telegram bot and any other client (e.g. Chainlit) so both see the same
+# pending/answered/expired state.
+
+def _pb_to_pending(rec: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": rec["id"],
+        "qid": rec["qid"],
+        "asked_at": rec["asked_at"],
+        "expires_at": rec["expires_at"],
+        "status": rec["status"],
+    }
+
+
+def create_pending_question(qid: str, expires_at_iso: str) -> dict[str, Any]:
+    now = dt.datetime.now(TZ)
+    rec = _pb().create("pending_questions", {
+        "qid": qid,
+        "asked_at": now.isoformat(timespec="seconds"),
+        "expires_at": expires_at_iso,
+        "status": "pending",
+    })
+    return _pb_to_pending(rec)
+
+
+def list_pending_questions() -> list[dict[str, Any]]:
+    now_iso = dt.datetime.now(TZ).isoformat(timespec="seconds")
+    filter_str = f'status = "pending" && expires_at > "{_fv(now_iso)}"'
+    recs = _pb().list_all("pending_questions", filter_str=filter_str, sort="-asked_at")
+    return [_pb_to_pending(r) for r in recs]
+
+
+def mark_pending_status(pending_id: str, status: str) -> None:
+    _pb().update_by_id("pending_questions", pending_id, {"status": status})
+
+
+def get_pending_question(pending_id: str) -> Optional[dict[str, Any]]:
+    rec = _pb().get_by_id("pending_questions", pending_id)
+    return _pb_to_pending(rec) if rec else None
+
+
+# ---------- chat_history ----------
+# Shared LLM conversation history, so Telegram and Chainlit continue the same
+# conversation regardless of which channel sent the last message.
+
+def save_chat_message(role: str, content: str) -> None:
+    # Microsecond precision: user/assistant turns are pushed back-to-back and
+    # must sort correctly even when they land in the same second.
+    now = dt.datetime.now(TZ)
+    _pb().create("chat_history", {
+        "ts": now.isoformat(timespec="microseconds"),
+        "role": role,
+        "content": content,
+    })
+
+
+def list_recent_chat_history(limit: int) -> list[dict[str, Any]]:
+    """Returns up to `limit` most recent messages, newest first."""
+    recs = _pb().list_all("chat_history", sort="-ts", limit=limit)
+    return [{"ts": r["ts"], "role": r["role"], "content": r.get("content", "")} for r in recs]
+
+
+def clear_chat_history() -> None:
+    for rec in _pb().list_all("chat_history"):
+        _pb().delete_by_id("chat_history", rec["id"])
+
+
 # ---------- utilities ----------
 
 def to_df(collection: str) -> pd.DataFrame:
@@ -506,4 +595,11 @@ def dump_all() -> dict[str, Any]:
         "questions": list_questions(active_only=False),
         "answers": query_answers(None, None, None, None, None, None),
         "scheduled_prompts": list_scheduled_prompts(active_only=False),
+        "pending_questions": [
+            _pb_to_pending(r) for r in _pb().list_all("pending_questions", sort="-asked_at")
+        ],
+        "chat_history": [
+            {"ts": r["ts"], "role": r["role"], "content": r.get("content", "")}
+            for r in _pb().list_all("chat_history", sort="-ts")
+        ],
     }

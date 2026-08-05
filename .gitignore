@@ -6,3 +6,7 @@ __pycache__/
 answers.db
 trend.png
 data/
+# Chainlit scaffold, regenerated on every run
+.chainlit/
+.files/
+chainlit.md

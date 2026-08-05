@@ -8,6 +8,8 @@ venv
 .env.example
 answers.db
 trend.png
+.chainlit
+.files
 README.md
 Dockerfile
 .dockerignore

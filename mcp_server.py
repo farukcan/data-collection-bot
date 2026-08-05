@@ -10,6 +10,7 @@ because it buffers response bodies and breaks text/event-stream.
 """
 import asyncio
 import base64
+import datetime as dt
 import logging
 import secrets
 import weakref
@@ -20,14 +21,33 @@ import uvicorn
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ImageContent, TextContent
 
-from agent import invoke_agent, push_history, trim_history
-from config import MCP_HOST, MCP_PORT, MCP_TOKEN
+from agent import invoke_agent
+from config import HISTORY_GAP_SECONDS, HISTORY_MAX_TURNS, MCP_HOST, MCP_PORT, MCP_TOKEN, TZ
 
 log = logging.getLogger("quizbot.mcp")
 
 # Per-SSE-session history. WeakKeyDictionary: when the session object is GC'd
 # (client disconnect), its entry vanishes automatically. No id() reuse risk.
+# Isolated from the shared Telegram/Chainlit history (agent.py's trim_history),
+# which is PocketBase-backed and not per-connection.
 _sessions: "weakref.WeakKeyDictionary[Any, dict[str, Any]]" = weakref.WeakKeyDictionary()
+
+
+def _trim_session_history(state: dict[str, Any]) -> list[dict[str, str]]:
+    """Returns the live per-session history list; clears it if last touch was >1h ago."""
+    last_ts: dt.datetime | None = state.get("history_last_ts")
+    now = dt.datetime.now(TZ)
+    if last_ts and (now - last_ts).total_seconds() > HISTORY_GAP_SECONDS:
+        state["history"] = []
+    return state.setdefault("history", [])
+
+
+def _push_session_history(state: dict[str, Any], role: str, content: str) -> None:
+    history = state.setdefault("history", [])
+    history.append({"role": role, "content": content})
+    if len(history) > HISTORY_MAX_TURNS:
+        del history[: len(history) - HISTORY_MAX_TURNS]
+    state["history_last_ts"] = dt.datetime.now(TZ)
 
 
 def _image_blocks_from_paths(paths: list[str]) -> list[ImageContent]:
@@ -71,7 +91,7 @@ def build_mcp(agent: Any, agent_lock: asyncio.Lock | None = None) -> FastMCP:
         if state is None:
             state = {}
             _sessions[session] = state
-        history = trim_history(state)
+        history = _trim_session_history(state)
         if agent_lock is None:
             reply, images = await invoke_agent(
                 agent, history=list(history), user_text=prompt
@@ -81,8 +101,8 @@ def build_mcp(agent: Any, agent_lock: asyncio.Lock | None = None) -> FastMCP:
                 reply, images = await invoke_agent(
                     agent, history=list(history), user_text=prompt
                 )
-        push_history(state, "user", prompt)
-        push_history(state, "assistant", reply)
+        _push_session_history(state, "user", prompt)
+        _push_session_history(state, "assistant", reply)
 
         blocks: list = [TextContent(type="text", text=reply or "")]
         blocks.extend(_image_blocks_from_paths(images))

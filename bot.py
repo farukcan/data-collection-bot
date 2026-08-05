@@ -35,6 +35,7 @@ import os
 
 import db
 import tables
+from questions_shared import option_pairs
 from agent import (
     build_agent,
     clear_history,
@@ -56,21 +57,15 @@ log = logging.getLogger("quizbot")
 # ---------- question delivery ----------
 def build_keyboard(q: dict[str, Any]) -> Any:
     qid = q["id"]
-    cfg = q["config"]
     qtype = q["type"]
-    if qtype == "scale":
-        btns = [
-            InlineKeyboardButton(str(v), callback_data=f"{qid}|{v}")
-            for v in range(cfg["min"], cfg["max"] + 1)
-        ]
-        row_size = 5 if len(btns) > 5 else len(btns)
-        rows = [btns[i : i + row_size] for i in range(0, len(btns), row_size)]
-        return InlineKeyboardMarkup(rows)
-    if qtype in ("rating", "choice"):
-        rows = [
-            [InlineKeyboardButton(opt, callback_data=f"{qid}|{i}")]
-            for i, opt in enumerate(cfg["options"])
-        ]
+    if qtype in ("scale", "rating", "choice"):
+        pairs = option_pairs(q)
+        btns = [InlineKeyboardButton(label, callback_data=f"{qid}|{value}") for label, value in pairs]
+        if qtype == "scale":
+            row_size = 5 if len(btns) > 5 else len(btns)
+            rows = [btns[i : i + row_size] for i in range(0, len(btns), row_size)]
+        else:
+            rows = [[b] for b in btns]
         return InlineKeyboardMarkup(rows)
     if qtype == "open":
         return ForceReply(selective=False)
@@ -92,14 +87,20 @@ async def send_question(context: ContextTypes.DEFAULT_TYPE, qid: str) -> None:
 
     msg = await context.bot.send_message(CHAT_ID, text, reply_markup=build_keyboard(q))
 
-    if q["type"] == "open":
-        pending = context.bot_data.setdefault("pending_open", {})
-        pending[msg.message_id] = qid
+    expires_at = dt.datetime.now(TZ) + dt.timedelta(minutes=q["timeout_minutes"])
+    pending_rec = db.create_pending_question(qid, expires_at.isoformat(timespec="seconds"))
+    pending_by_message = context.bot_data.setdefault("pending_by_message", {})
+    pending_by_message[msg.message_id] = {"qid": qid, "pending_id": pending_rec["id"]}
 
     context.job_queue.run_once(
         delete_message_job,
         when=q["timeout_minutes"] * 60,
-        data={"chat_id": CHAT_ID, "message_id": msg.message_id, "qid": qid},
+        data={
+            "chat_id": CHAT_ID,
+            "message_id": msg.message_id,
+            "qid": qid,
+            "pending_id": pending_rec["id"],
+        },
         name=f"timeout:{qid}:{msg.message_id}",
     )
 
@@ -110,7 +111,12 @@ async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         await context.bot.delete_message(data["chat_id"], data["message_id"])
     except Exception as exc:
         log.info("delete_message_job failed mid=%s: %s", data["message_id"], exc)
-    context.bot_data.get("pending_open", {}).pop(data["message_id"], None)
+    # Only expire what is still open: Chainlit may have answered it, and it
+    # cannot cancel this job.
+    current = db.get_pending_question(data["pending_id"])
+    if current and current["status"] == "pending":
+        db.mark_pending_status(data["pending_id"], "expired")
+    context.bot_data.get("pending_by_message", {}).pop(data["message_id"], None)
 
 
 def cancel_timeout(context: ContextTypes.DEFAULT_TYPE, qid: str, message_id: int) -> None:
@@ -345,7 +351,7 @@ async def cmd_dump(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    clear_history(context.bot_data)
+    clear_history()
     await update.message.reply_text(
         "LLM sohbet geçmişi sıfırlandı. Sonraki mesajlar önceki konuşmayı görmez."
     )
@@ -414,6 +420,14 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not q:
         await query.edit_message_text("Soru artık mevcut değil.")
         return
+    pending_by_message = context.bot_data.get("pending_by_message", {})
+    entry = pending_by_message.get(query.message.message_id)
+    if entry:
+        current = db.get_pending_question(entry["pending_id"])
+        if not current or current["status"] != "pending":
+            pending_by_message.pop(query.message.message_id, None)
+            await query.edit_message_text(f"❓ {q['text']}\n→ Zaten cevaplanmış veya süresi dolmuş.")
+            return
     cfg = q["config"]
     answer_label = val
     if q["type"] in ("rating", "choice"):
@@ -423,6 +437,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         answer_label = cfg["options"][idx]
     db.save_answer(qid, q["type"], answer_label)
     await query.edit_message_text(f"❓ {q['text']}\n→ Kaydedildi: {answer_label}")
+    if entry:
+        pending_by_message.pop(query.message.message_id, None)
+        db.mark_pending_status(entry["pending_id"], "answered")
     cancel_timeout(context, qid, query.message.message_id)
 
 
@@ -432,15 +449,22 @@ async def on_open_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> O
     msg = update.message
     if not msg.reply_to_message:
         return None
-    pending: dict[int, str] = context.bot_data.get("pending_open", {})
-    qid = pending.get(msg.reply_to_message.message_id)
-    if not qid:
+    pending_by_message: dict[int, dict[str, str]] = context.bot_data.get("pending_by_message", {})
+    entry = pending_by_message.get(msg.reply_to_message.message_id)
+    if not entry:
         return None
+    qid = entry["qid"]
     q = db.get_question(qid)
     if not q or q["type"] != "open":
         return None
+    current = db.get_pending_question(entry["pending_id"])
+    if not current or current["status"] != "pending":
+        pending_by_message.pop(msg.reply_to_message.message_id, None)
+        await msg.reply_text("Bu soru zaten cevaplanmış veya süresi dolmuş.")
+        return True
     db.save_answer(qid, "open", msg.text)
-    pending.pop(msg.reply_to_message.message_id, None)
+    pending_by_message.pop(msg.reply_to_message.message_id, None)
+    db.mark_pending_status(entry["pending_id"], "answered")
     cancel_timeout(context, qid, msg.reply_to_message.message_id)
     await msg.reply_text("Kaydedildi 📝")
     return True
@@ -457,7 +481,7 @@ async def on_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     agent = context.bot_data["agent"]
     agent_lock: asyncio.Lock = context.bot_data["agent_lock"]
-    history = trim_history(context.bot_data)
+    history = trim_history()
     await context.bot.send_chat_action(msg.chat_id, "typing")
     try:
         async with agent_lock:
@@ -466,8 +490,8 @@ async def on_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.exception("agent invocation failed")
         await msg.reply_text(f"⚠️ Agent hata: {exc}")
         return
-    push_history(context.bot_data, "user", text)
-    push_history(context.bot_data, "assistant", reply)
+    push_history("user", text)
+    push_history("assistant", reply)
     await send_images(context.bot, msg.chat_id, images)
     if reply:
         await msg.reply_text(reply)
