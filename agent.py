@@ -318,12 +318,44 @@ def build_tools(
 
 
 # ---------- agent ----------
+# The gateway serving the gpt-luna family injects a reasoning_effort default that
+# /v1/chat/completions rejects as soon as function tools are attached:
+#   "Function tools with reasoning_effort are not supported for gpt-5.6-luna in
+#    /v1/chat/completions. To use function tools, use /v1/responses or set
+#    reasoning_effort to none."
+# Sending reasoning_effort explicitly overrides that injected default. It has to
+# travel inside model_kwargs because langchain-openai 0.2.8 exposes no field for
+# it. Those models also reject the 0.7 temperature langchain-openai always puts
+# on the wire, and temperature is a plain float field there, so it cannot be
+# dropped — pin it to the single value reasoning models accept, the same
+# workaround langchain-openai itself applies to o1.
+LUNA_MODEL_MARKER = "luna"
+
+
+def openai_model_overrides(model: str) -> dict[str, Any]:
+    """Extra ChatOpenAI kwargs a model needs; empty for models that need none."""
+    if LUNA_MODEL_MARKER not in model.lower():
+        return {}
+    return {
+        "temperature": 1,
+        "model_kwargs": {"reasoning_effort": "none"},
+    }
+
+
 def build_agent(
     reschedule_question: Callable[[str], None],
     reschedule_prompt: Callable[[str], None],
 ):
-    log.info("Initializing LLM provider=%s model=%s", LLM_PROVIDER, LLM_MODEL)
-    llm = init_chat_model(LLM_MODEL, model_provider=LLM_PROVIDER)
+    # Only the OpenAI path goes through ChatOpenAI; anthropic/ollama take no
+    # such kwargs and must stay untouched.
+    overrides = openai_model_overrides(LLM_MODEL) if LLM_PROVIDER == "openai" else {}
+    log.info(
+        "Initializing LLM provider=%s model=%s overrides=%s",
+        LLM_PROVIDER,
+        LLM_MODEL,
+        overrides,
+    )
+    llm = init_chat_model(LLM_MODEL, model_provider=LLM_PROVIDER, **overrides)
     tools = build_tools(reschedule_question, reschedule_prompt)
     return create_react_agent(llm, tools, state_modifier=SYSTEM_PROMPT)
 

@@ -130,6 +130,29 @@ Default models per provider:
 - `anthropic` → `claude-haiku-4-5-20251001`
 - `ollama` → `llama3.1`
 
+#### gpt-luna models
+Any `openai`-provider model whose name contains `luna` (e.g. `gpt-5.6-luna`)
+is served by a gateway that injects a `reasoning_effort` default.
+`/v1/chat/completions` rejects that default as soon as function tools are
+attached, and the agent always attaches tools:
+
+> Function tools with reasoning_effort are not supported for gpt-5.6-luna in
+> /v1/chat/completions. To use function tools, use /v1/responses or set
+> reasoning_effort to none.
+
+`agent.openai_model_overrides` therefore sends `reasoning_effort="none"`
+explicitly for these models, which overrides the injected default. It also
+pins `temperature` to `1`, the only value reasoning models accept — the
+default `0.7` that `langchain-openai` always puts on the wire cannot be
+omitted in the pinned version. No other model or provider is affected.
+
+Covered by `tests/test_llm_params.py`, which asserts the request body on a
+mocked transport. Run it with:
+
+```bash
+python -m unittest discover -s tests
+```
+
 ## 5) Commands
 - `/start` — command help as a table image (chat id in caption)
 - `/list` — table image of active questions + scheduled prompts (next cron run)
